@@ -2,6 +2,10 @@
 import pexpect
 import sys
 import os
+import struct
+import fcntl
+import termios
+import signal
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -13,6 +17,15 @@ JUMP_PASSWORD = os.getenv('JUMP_PASSWORD')
 DEST_HOST = os.getenv('DEST_HOST', 'lxplus9.cern.ch')
 DEST_USER = os.getenv('DEST_USER')
 DEST_PASSWORD = os.getenv('DEST_PASSWORD')
+
+def get_terminal_size():
+    try:
+        s = struct.pack('HHHH', 0, 0, 0, 0)
+        result = fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, s)
+        rows, cols = struct.unpack('HHHH', result)[:2]
+        return rows, cols
+    except:
+        return 24, 80
 
 def validate_config():
     missing = []
@@ -30,18 +43,25 @@ def validate_config():
         for m in missing:
             print(f"  - {m}")
         print("\nPlease create a .env file with your SSH credentials")
-        print("See .env.example for reference")
         sys.exit(1)
 
 def connect_ssh():
     validate_config()
 
-    ssh_command = f'ssh {JUMP_USER}@{JUMP_HOST}'
+    rows, cols = get_terminal_size()
+    ssh_command = f'ssh -t {JUMP_USER}@{JUMP_HOST}'
 
     print(f"=== Step 1: Connecting to {JUMP_USER}@{JUMP_HOST} ===")
 
     try:
-        child = pexpect.spawn(ssh_command, encoding='utf-8', timeout=60)
+        child = pexpect.spawn(ssh_command, encoding='utf-8', timeout=60,
+                              dimensions=(rows, cols))
+
+        def sigwinch_handler(sig, frame):
+            rows, cols = get_terminal_size()
+            child.setwinsize(rows, cols)
+
+        signal.signal(signal.SIGWINCH, sigwinch_handler)
 
         index = child.expect([
             '[Pp]assword:',
@@ -90,14 +110,14 @@ def connect_ssh():
             pass
 
         try:
-            child.expect(['\\$', '\\]\\$'], timeout=30)
+            child.expect(['\\$', '\\]\\$', '\\] \\$'], timeout=30)
             print(f"Connected to {JUMP_HOST}!\n")
         except pexpect.TIMEOUT:
             pass
 
         print(f"=== Step 2: Connecting to {DEST_USER}@{DEST_HOST} ===")
 
-        ssh_command_2 = f'ssh {DEST_USER}@{DEST_HOST}'
+        ssh_command_2 = f'ssh -t {DEST_USER}@{DEST_HOST}'
         child.sendline(ssh_command_2)
 
         index = child.expect([
@@ -134,8 +154,7 @@ def connect_ssh():
             pass
 
         print(f"\nConnected to {DEST_USER}@{DEST_HOST}!")
-        print("You now have an interactive terminal.")
-        print("Type 'exit' twice or press Ctrl+D to disconnect.\n")
+        print("Type 'exit' twice to disconnect.\n")
 
         child.interact()
 
